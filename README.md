@@ -13,6 +13,7 @@ sudo apt update && sudo apt install -y gcc build-essential libssl-dev
 export PES_AUTHOR="Thejaswi Kishore <PES1UG23CS655>"
 make all
 ## Phase 1 — Object Storage Foundation
+```
 
 Files modified: `object.c`
 
