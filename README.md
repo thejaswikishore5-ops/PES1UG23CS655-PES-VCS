@@ -25,4 +25,5 @@ partial file even on a crash.
 `object_read` reverifies the SHA-256 after reading (integrity check), parses
 the type and declared size from the header, validates the declared size against
 the actual byte count, then returns the data portion in a caller-owned buffer.
+Screenshot 1A — ./test_objects
 
