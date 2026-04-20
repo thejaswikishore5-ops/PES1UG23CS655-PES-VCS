@@ -26,5 +26,3 @@ object_read reverifies the SHA-256 after reading (integrity check), parses
 the type and declared size from the header, validates the declared size against
 the actual byte count, then returns the data portion in a caller-owned buffer.
 
-Screenshot 1A — ./test_objects
-<img width="1512" height="563" alt="WhatsApp Image 2026-04-20 at 5 17 10 PM" src="https://github.com/user-attachments/assets/f1dd7bef-e64b-4252-8204-8ecdd96e3ed7" />
