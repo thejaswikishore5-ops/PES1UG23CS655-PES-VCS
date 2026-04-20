@@ -97,80 +97,164 @@ Final — make test-integration
 
 
 
-Phase 5 — Branching and Checkout
-Q5.1 — How would you implement pes checkout <branch>?
-Files that must change in .pes/:
+## Phase 5 — Branching and Checkout
 
-.pes/HEAD — rewrite the line from ref: refs/heads/<current> to ref: refs/heads/<target>.
-If the target branch is new, create .pes/refs/heads/<target> pointing to the desired commit hash.
-Working-directory update:
+### Q5.1 — How would you implement `pes checkout <branch>`?
 
-Read the target branch tip from .pes/refs/heads/<branch>.
-object_read the root tree of that commit.
-Recursively walk the tree: for blob entries write (or overwrite) the file in the working directory; for tree entries (mode 040000) create directories.
-Delete any working-directory file that is present in the current HEAD's tree but absent from the target tree.
-What makes this complex:
+**Files that must change in `.pes/`:**
 
-Dirty-file conflicts. If a tracked file has local modifications and the target branch has a different version of that file, checkout must refuse or the user's edits are destroyed silently.
-Untracked-file collisions. If an untracked file sits at a path that the target tree would create, checkout must refuse to avoid clobbering it.
-Partial failure. A crash halfway through leaves a mixed working directory. A production implementation writes a lock or in-progress marker to allow recovery.
-Three-way diff. Deciding which files to touch requires comparing the current-HEAD tree, the target-HEAD tree, and the index all at once.
-Q5.2 — Detecting dirty working-directory conflicts
-Using only the index and the object store:
+1. `.pes/HEAD` — rewrite the line from  
+   `ref: refs/heads/<current>` to `ref: refs/heads/<target>`  
+2. If the target branch is new, create  
+   `.pes/refs/heads/<target>` pointing to the desired commit hash  
 
-Load the current index (the staged snapshot matching HEAD after the last commit).
-For each entry, stat() the working-directory file. If st_mtime or st_size differs from the stored values, re-hash the file (SHA-256) and compare to the stored hash. A mismatch means the file is dirty.
-For each path in the target branch's tree: if that path is in the index and is dirty (step 2), refuse checkout for that path.
-For untracked files: if a path in the target tree does not appear in the index but already exists on disk, refuse checkout to avoid overwriting it.
-The mtime/size check is a fast first pass; the full hash re-read is the authoritative check used only when metadata differs.
+---
 
-Q5.3 — Detached HEAD and recovery
-When HEAD holds a raw commit hash instead of ref: refs/heads/<branch>, head_update writes new hashes directly into HEAD. Commits still chain correctly via parent pointers, but no branch file is updated. Once you check out a branch, HEAD is overwritten and the detached chain has no ref pointing to it — it becomes unreachable from all named references.
+**Working-directory update:**
 
-Recovery before switching away:
+1. Read the target branch tip from `.pes/refs/heads/<branch>`  
+2. `object_read` the root tree of that commit  
+3. Recursively walk the tree:
+   - For blob entries → write (or overwrite) files  
+   - For tree entries (`040000`) → create directories  
+4. Delete any working-directory file that exists in the current HEAD but not in the target tree  
 
-cat .pes/HEAD                            # note the hash
+---
+
+**What makes this complex:**
+
+- **Dirty-file conflicts:**  
+  If a tracked file has local changes and the target branch has a different version, checkout must refuse  
+
+- **Untracked-file collisions:**  
+  If an untracked file exists where the target wants to write, checkout must refuse  
+
+- **Partial failure:**  
+  Crash midway can corrupt working directory → requires recovery mechanism  
+
+- **Three-way diff:**  
+  Must compare current HEAD, target HEAD, and index  
+
+---
+
+### Q5.2 — Detecting dirty working-directory conflicts
+
+**Using only the index and object store:**
+
+1. Load the current index (snapshot of last commit)  
+2. For each entry:
+   - Use `stat()`  
+   - If `mtime` or size differs → recompute SHA-256  
+   - If hash differs → file is dirty  
+
+3. For each path in target tree:
+   - If present in index AND dirty → refuse checkout  
+
+4. For untracked files:
+   - If file exists on disk but not in index → refuse checkout  
+
+**Note:**  
+`mtime/size` is a fast check; hashing is the final verification  
+
+---
+
+### Q5.3 — Detached HEAD and recovery
+
+When `HEAD` stores a raw commit hash instead of  
+`ref: refs/heads/<branch>`:
+
+- Commits still form a chain  
+- But no branch points to them → becomes unreachable  
+
+---
+
+**Recovery before switching away:**
+
+```bash
+cat .pes/HEAD
 echo <hash> > .pes/refs/heads/recovered
-echo "ref: refs/heads/recovered" > .pes/HEAD
-Recovery after switching away: the commit objects still exist in the object store. Walk every file under .pes/objects/, call object_read on each, and look for OBJ_COMMIT objects whose parent chain leads to your lost work. Git calls this git fsck --lost-found. The GC grace period (see Q6.2) keeps the objects safe for at least two weeks.
+echo "ref: refs/heads/recovered" > .pes/HEAD.
+## Phase 6 — Garbage Collection
 
-Phase 6 — Garbage Collection
-Q6.1 — Algorithm to find and delete unreachable objects
-Mark-and-sweep:
+### Q6.1 — Algorithm to find and delete unreachable objects
 
-Mark phase — build the reachable set:
+**Mark-and-Sweep Approach**
 
-Enumerate every file under .pes/refs/ and read HEAD to get the GC roots.
-For each root commit hash, call object_read. Add its hash, the tree hash, and every blob/subtree hash found by recursively walking the tree to a reachable set. Follow each commit's parent pointer until has_parent == 0.
-Data structure: a sorted array of ObjectID (32 bytes each) with binary search — O(n log n) to build, O(log n) per lookup. A hash table gives O(1) average lookup for larger repos.
+---
 
-Sweep phase — delete unreachable objects:
+**Mark Phase — build the reachable set:**
 
-Walk every file under .pes/objects/XX/. Reconstruct the full hash from the directory name and filename, convert with hex_to_hash. If not in reachable, call unlink().
+1. Enumerate all references under `.pes/refs/` and read `HEAD`  
+2. For each root commit hash:
+   - Call `object_read`  
+   - Add commit hash to reachable set  
+   - Add tree hash  
+   - Recursively add all blobs and subtrees  
+3. Follow parent commits until `has_parent == 0`  
 
-Estimate for 100,000 commits, 50 branches:
+---
 
-Assuming roughly four unique objects per commit on average (one commit, one to two trees, one to two new blobs, the rest shared):
+**Data structure:**
 
-Reachable set ≈ 400,000 objects → 400,000 object_read calls in the mark phase.
-Sweep: walk all ~400,000 files in the object store.
-Total: roughly 800,000 file accesses.
-Q6.2 — Race condition between GC and a concurrent commit
-The race:
+- Sorted array of `ObjectID` (32 bytes each)  
+  - Build: `O(n log n)`  
+  - Lookup: `O(log n)`  
+- Hash table (alternative): `O(1)` average lookup  
 
-Time	pes commit	GC
-t1	object_write(OBJ_BLOB) stores blob B	—
-t2	—	Mark phase reads HEAD → old commit. B is not reachable from any ref.
-t3	object_write(OBJ_TREE) creates tree T referencing B	—
-t4	—	Sweep: B is not in reachable set → unlink(B)
-t5	object_write(OBJ_COMMIT) + head_update completes	—
-Result: HEAD now points to a commit whose tree references the deleted blob B. The repository is corrupt.
+---
 
-How Git avoids this:
+**Sweep Phase — delete unreachable objects:**
 
-Grace period (gc.pruneExpire, default 2 weeks). GC skips any loose object whose filesystem mtime is younger than the grace period. A freshly written blob is always newer than two weeks, so it is never collected before it is referenced by a commit.
-Keep-alive refs. Git writes temporary refs (FETCH_HEAD, MERGE_HEAD, ORIG_HEAD) during in-flight operations, so GC sees those objects as reachable roots.
-Pack-before-prune ordering. When converting loose objects to pack files, Git writes and verifies the pack before deleting any loose objects, so there is never a window where an object exists only in a half-written pack.
-The atomic rename used when writing objects does not help here — blob B is fully written before GC runs. Only the grace period closes the time window reliably.
+1. Traverse `.pes/objects/XX/`  
+2. Reconstruct full hash using directory + filename  
+3. Convert using `hex_to_hash`  
+4. If not in reachable set → delete using `unlink()`  
+
+---
+
+**Estimate (100,000 commits, 50 branches):**
+
+- ~400,000 reachable objects  
+- ~400,000 `object_read` calls (mark phase)  
+- ~400,000 file checks (sweep phase)  
+
+**Total ≈ 800,000 file accesses**
+
+---
+
+### Q6.2 — Race condition between GC and a concurrent commit
+
+**The race condition:**
+
+| Time | `pes commit` | GC |
+|------|-------------|----|
+| t1 | `object_write(OBJ_BLOB)` stores blob B | — |
+| t2 | — | Mark phase reads old HEAD → B not reachable |
+| t3 | `object_write(OBJ_TREE)` creates tree T referencing B | — |
+| t4 | — | Sweep deletes B (`unlink`) |
+| t5 | `object_write(OBJ_COMMIT)` + `head_update` | — |
+
+---
+
+**Result:**  
+HEAD points to a commit whose tree references a deleted blob → **repository corruption**
+
+---
+
+### How Git avoids this
+
+1. **Grace period (`gc.pruneExpire`, default: 2 weeks)**  
+   - Newly created objects are not deleted immediately  
+
+2. **Keep-alive references**  
+   - Temporary refs like `FETCH_HEAD`, `MERGE_HEAD`, `ORIG_HEAD`  
+   - Ensures objects remain reachable  
+
+3. **Pack-before-prune ordering**  
+   - Objects are safely packed before deletion  
+
+4. **Atomic rename is NOT sufficient**  
+   - Blob is already written before GC runs  
+   - Only the grace period prevents this race reliably  
 
 
